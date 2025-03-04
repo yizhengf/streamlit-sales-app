@@ -4,6 +4,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import os
 import re
+from datetime import datetime
 
 def read_file(file):
     """
@@ -36,17 +37,79 @@ def parse_date(date_str):
     for abbr, month_num in month_abbr.items():
         if abbr in date_str:
             year_match = re.search(r'\b(\d{4})\b', date_str)
-            if year_match:
+            hour_match = re.search(r'(\d{1,2}):\d{2}:\d{2} (AM|PM)', date_str)
+            if year_match and hour_match:
                 year = year_match.group(1)
-                return year, month_num, date_str  # 返回原始日期字符串
+                hour = int(hour_match.group(1))
+                if hour_match.group(2) == 'PM' and hour != 12:
+                    hour += 12  # PM且不是12点，转换为24小时制
+                elif hour_match.group(2) == 'AM' and hour == 12:
+                    hour = 0  # AM且是12点，转换为0点
+                return year, month_num, date_str, hour  # 返回原始日期字符串和小时
             else:
-                return None, month_num, date_str
+                return None, month_num, date_str, None
             
-    return None, None, date_str
+    return None, None, date_str, None
+
+def process_data(df):
+    """
+    处理数据，确保数据类型正确并计算销售额
+    """
+    # 确保 quantity 列为数值类型
+    df['quantity'] = pd.to_numeric(df['quantity'], errors='coerce')  # 将无法转换的值设置为 NaN
+
+    # 确保 product-sales 列为数值类型
+    df['product-sales'] = pd.to_numeric(df['product-sales'], errors='coerce')  # 将无法转换的值设置为 NaN
+
+    # 检查是否有 NaN 值
+    if df['quantity'].isnull().any() or df['product-sales'].isnull().any():
+        st.warning("Warning: Some rows contain NaN values in 'quantity' or 'product-sales'. These rows will be dropped.")
+
+    # 删除包含 NaN 的行
+    df = df.dropna(subset=['quantity', 'product-sales'])
+
+    # 计算销售额
+    df['sales_amount'] = df['quantity'] * df['product-sales']  # 计算销售额
+    st.write(df.head())
+
+    # 检查 sales_amount 列是否成功创建
+    if 'sales_amount' not in df.columns:
+        st.error("Sales amount calculation failed. Please check your data.")
+        st.write(df.head())  # 输出 DataFrame 的前几行以便调试
+        return df  # 返回未修改的 DataFrame
+    return df
+
+def parse_purchase_date(date_str):
+    """
+    解析 purchase-date 字符串，返回日期和小时
+    """
+    try:
+        # 解析格式为 'Jan 16, 2024 8:35:49 AM PST'
+        date_obj = datetime.strptime(date_str, '%b %d, %Y %I:%M:%S %p %Z')
+        return date_obj.date(), date_obj.hour  # 返回日期和小时
+    except ValueError:
+        return None, None  # 如果日期格式不正确，返回 None
+
+
+def extract_year_month(df):
+    """
+    从 purchase-date 列中提取年份和月份
+    """
+    years = []
+    months = []
+    for date_str in df['purchase-date']:
+        date_obj = parse_purchase_date(date_str)
+        if date_obj:
+            years.append(date_obj.year)
+            months.append(date_obj.month)
+        else:
+            years.append(None)
+            months.append(None)
+    return years, months
 
 def main():
-    st.set_page_config(page_title="Product Sales Analysis", layout="wide")
-    st.title('Product Sales Analysis')
+    st.set_page_config(page_title="product-sales Analysis", layout="wide")
+    st.title('product-sales Analysis')
     
     try:
         uploaded_files = st.sidebar.file_uploader(
@@ -71,6 +134,17 @@ def main():
             
         # 合并所有上传的文件数据
         df = pd.concat(df_list, ignore_index=True)
+        # 提取日期和小时信息
+        df['purchase-date'] = df['purchase-date'].astype(str)  # 确保为字符串格式
+        df['date'], df['hour'] = zip(*df['purchase-date'].apply(parse_purchase_date))  # 提取日期和小时
+
+        # 处理数据并计算销售额
+        df = process_data(df)
+
+        # 检查 sales_amount 列是否存在
+        if 'sales_amount' not in df.columns:
+            st.error("Sales amount calculation failed. Please check your data.")
+            return
 
         # 确保 quantity 列为数值类型
         df['quantity'] = pd.to_numeric(df['quantity'], errors='coerce')
@@ -81,16 +155,19 @@ def main():
         years = []
         months = []
         days = []
+        hours= []
         
         for date_str in df[date_column].astype(str):
-            year, month, original_date = parse_date(date_str)
+            year, month, original_date, hour = parse_date(date_str)
             years.append(year)
             months.append(month)
             days.append(original_date)  # 直接使用原始日期字符串
+            hours.append(hour)
 
         df['year'] = years
         df['month_only'] = months
         df['date'] = days  # 保留原始日期字符串
+        df['hour_only'] = hours # 保留小时
 
         # 检查是否有未解析的日期
         if None in df['year'] or None in df['month_only']:
@@ -152,7 +229,7 @@ def main():
         selected_product_name = st.sidebar.selectbox(
             "Select Product Name",
             options=filtered_product_names,
-            index=0 if filtered_product_names else -1  # 不设默认值
+            index= 0 if filtered_product_names else -1  # 不设默认值
         )
         
         # 单独的 SKU 搜索框
@@ -178,7 +255,7 @@ def main():
         top_n = st.sidebar.slider(
             "Select Top N SKUs to Display",
             min_value=1,
-            max_value=20,  # 假设最多展示 20 个 SKU
+            max_value= len(df['sku'].unique()),  # 假设最多展示 20 个 SKU
             value=5  # 默认选择前 5 个 SKU
         )
         
@@ -192,14 +269,13 @@ def main():
         
         # 移除 SKU 为 NaN 的行
         df_filtered = df_filtered[df_filtered['sku'].notna()]
-        
-    
 
+   
+        
         if df_filtered.empty:
             st.warning('No data matches your filter criteria')
             return
         
-       
         # 统计每个 SKU 的每个月的销量
         monthly_sales = df_filtered.groupby(['year', 'month_only', 'sku']).agg(
             total_sales=('quantity', 'sum')
@@ -216,13 +292,87 @@ def main():
             values='total_sales',
             fill_value=0
         )
-        # 绘制热图
+        # 绘制月度热图
         plt.figure(figsize=(12, 6))
         sns.heatmap(pivot_sales, cmap='YlGnBu', annot=True, fmt='g', linewidths=.5)
         plt.title(f'Monthly Sales Heatmap by SKU (Top {top_n})')
         plt.xlabel('SKU')
         plt.ylabel('Month')
         st.pyplot(plt)
+         
+        # 统计每个 SKU 的每个小时的销量
+        hourly_sales = df_filtered.groupby(['year', 'hour_only', 'sku']).agg(
+            total_sales=('quantity', 'sum')
+        ).reset_index()
+
+        # 获取销量前 N 的 SKU
+        top_skus = hourly_sales.groupby('sku')['total_sales'].sum().nlargest(top_n).index
+        hourly_sales_top = hourly_sales[hourly_sales['sku'].isin(top_skus)]
+
+        # 创建透视表以便于绘图
+        pivot_sales_hour = hourly_sales_top.pivot_table(
+            index='hour_only',  # Y 轴只展示月份
+            columns='sku',
+            values='total_sales',
+            fill_value=0
+        )
+        # 绘制小时热图
+        plt.figure(figsize=(12, 6))
+        sns.heatmap(pivot_sales_hour, cmap='YlGnBu', annot=True, fmt='g', linewidths=.5)
+        plt.title(f'Hourly Sales Heatmap by SKU (Top {top_n})')
+        plt.xlabel('SKU')
+        plt.ylabel('Hour')
+        st.pyplot(plt)
+
+        #    # 创建透视表以便于绘图
+        # pivot_sales = hourly_sales_top.pivot_table(
+        #     index='month_only',  # Y 轴只展示月份
+        #     columns='sku',
+        #     values='total_sales',
+        #     fill_value=0
+        # )
+
+       
+        # # 创建原始透视表以便于绘图，统计每种类型的销量
+        # heatmap_data = df_filtered.pivot_table(
+        #     index='hour_only',  # Y 轴展示月份
+        #     columns='sku',  # X 轴展示 SKU
+        #     values='quantity',  # 数量
+        #     aggfunc='sum',  # 聚合函数，统计每种类型的销量
+        #     fill_value=0  # 填充缺失值为 0
+        # )
+        #  # 创建透视表，按小时和 SKU 聚合
+        # hourly_sales = df.groupby(['hour', 'sku']).agg(
+        #     total_sales=('quantity', 'sum')
+        # ).reset_index()
+
+       
+        # # 绘制小时级别的热力图
+        # if not hourly_sales.empty:  # 检查数据是否为空
+        #     heatmap_data = hourly_sales.pivot(index='hour', columns='sku', values='total_sales')
+        #     plt.figure(figsize=(12, 6))
+        #     sns.heatmap(heatmap_data, annot=True, fmt=".1f", cmap='YlGnBu')
+        #     plt.title(f'Hourly Sales Heatmap')
+        #     plt.xlabel('SKU')
+        #     plt.ylabel('Hour of the Day')
+        #     st.pyplot(plt)
+        # else:
+        #     st.warning("No data available for the selected date.")
+
+    except Exception as e:
+        st.error(f"Error processing data: {str(e)}")
+        raise e
+
+        # 其他图像展示（如小时销售额的热图）
+        if not hourly_sales.empty:  # 检查数据是否为空
+            plt.figure(figsize=(12, 6))
+            sns.heatmap(hourly_sales.pivot(index='hour', columns='total_sales', values='total_quantity'), annot=True, fmt=".1f", cmap='YlGnBu')
+            plt.title(f'Hourly Sales Heatmap ')
+            plt.xlabel('Total Sales')
+            plt.ylabel('Hour of the Day')
+            st.pyplot(plt)
+        else:
+            st.warning("No data available for the selected date.")
 
         # 统计每种 type 的订单数量和销售额
         order_counts = df_filtered.groupby(['sku', 'type']).agg(
@@ -261,7 +411,7 @@ def main():
         plt.legend(title='Type')
 
         st.pyplot(plt)
-
+    
         # 创建原始透视表以便于绘图，统计每种类型的销量
         heatmap_data = df_filtered.pivot_table(
             index='month_only',  # Y 轴展示月份
@@ -270,8 +420,6 @@ def main():
             aggfunc='sum',  # 聚合函数，统计每种类型的销量
             fill_value=0  # 填充缺失值为 0
         )
-
-       
 
         # 仅在同时选择 Order 和 Refund 时创建新的透视表计算净销售量
         if "Order" in selected_types and "Refund" in selected_types:
@@ -290,12 +438,15 @@ def main():
             if not net_sales_data.empty:
                 # 绘制净销售量热力图
                 plt.figure(figsize=(12, 6))
-                sns.heatmap(net_sales_data, annot=True, fmt='.0f', cmap='YlGnBu', cbar_kws={'label': 'Net Sales'})
+                sns.heatmap(net_sales_data, annot=True, fmt='.2f', cmap='YlGnBu', cbar_kws={'label': 'Net Sales'})
                 plt.title('Net Sales by Month and SKU')
                 plt.xlabel('SKU')
                 plt.ylabel('Month')
                 plt.xticks(rotation=45)
                 st.pyplot(plt)
+        else:
+            st.warning('Please select both Order and Refund to display the net sales heatmap.')
+   
 
     except Exception as e:
         st.error(f"Error processing data: {str(e)}")
